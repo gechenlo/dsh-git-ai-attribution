@@ -33,5 +33,13 @@
     },
     "manifestVersion": 1
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gechenlo/dsh-git-ai-attribution.git"
+  },
+  "bugs": {
+    "url": "https://github.com/gechenlo/dsh-git-ai-attribution/issues"
+  },
+  "homepage": "https://github.com/gechenlo/dsh-git-ai-attribution#readme",
   "license": "MIT"
 }
