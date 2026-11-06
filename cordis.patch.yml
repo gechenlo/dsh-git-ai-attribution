@@ -1,0 +1,7 @@
+# Applied automatically when this package appears in the profile's
+# `dsh.profile.bundles`, so installing the plugin needs no hand-edited patch.
+# Do not also add a manual `insert` row for the same id: the loader rejects
+# duplicate ids.
+- insert:
+    - id: git-ai-attribution
+      name: 'dsh-git-ai-attribution'

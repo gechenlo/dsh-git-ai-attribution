@@ -33,36 +33,40 @@ DSH 调用 write/edit
 
 ## 安装
 
-### 方式一：本地目录（推荐，便于自己改）
+插件自带 `cordis.patch.yml`，声明为 profile 的 bundle 后会自动挂载，**不需要手改任何 YAML**。
+
+### 方式一：从 Git 仓库安装（推荐）
 
 ```powershell
-git clone https://github.com/<你的用户名>/dsh-git-ai-attribution.git
-# 放进当前 profile 的 node_modules
-$dest = "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-git-ai-attribution"
-Copy-Item .\dsh-git-ai-attribution $dest -Recurse -Force
+cd "$env:USERPROFILE\.dsh\profiles\desktop"
+pnpm add github:gechenlo/dsh-git-ai-attribution#v0.2.0
 ```
 
-然后在 `%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml` 末尾追加：
+然后把包名加进同目录 `package.json` 的 `dsh.profile.bundles`：
 
-```yaml
-- insert:
-    - id: git-ai-attribution
-      name: dsh-git-ai-attribution
-      config:
-        enabled: true
+```json
+"bundles": [
+  "@deepseek-ai/dsh-base",
+  "@deepseek-ai/dsh-web-app",
+  "dsh-git-ai-attribution"
+]
 ```
 
 重启 DSH。
 
-> 如果你用的是自定义 `DSH_HOME`，把上面路径里的 `.dsh` 换成实际目录。
+> `dsh plugin add` 在 desktop profile 上会被拒绝（该 profile 由 Electron 独占管理），所以这里直接用 `pnpm add`。自定义 `DSH_HOME` 时把路径里的 `.dsh` 换成实际目录。
 
-### 方式二：从 Git 仓库直接装
+### 方式二：本地目录（开发调试用）
 
 ```powershell
-dsh plugin add github:<你的用户名>/dsh-git-ai-attribution
+git clone https://github.com/gechenlo/dsh-git-ai-attribution.git
+cd "$env:USERPROFILE\.dsh\profiles\desktop"
+pnpm add file:D:\work\dsh-git-ai-attribution
 ```
 
-装完同样在 `cordis.patch.yml` 里加那个 `insert` 条目（或在插件面板里启用）。
+同样把 `dsh-git-ai-attribution` 写进 `dsh.profile.bundles`。链接安装的好处是：改源码后只要重启 DSH 就生效，不用重新安装。
+
+> 手动把目录拷进 `node_modules` 也能跑，但插件市场的「已安装」列表读的是 `package.json` 依赖，拷进去不会出现在列表里。用 `pnpm add` 才登记。
 
 ## 验证
 
