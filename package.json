@@ -1,0 +1,37 @@
+{
+  "name": "dsh-git-ai-attribution",
+  "version": "0.2.0",
+  "description": "Attribute DSH AI edits to TRAE's git-ai store so they appear in the TRAE enterprise AI contribution report.",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "git-ai",
+    "trae",
+    "ai-attribution"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    },
+    "manifestVersion": 1
+  },
+  "license": "MIT"
+}
