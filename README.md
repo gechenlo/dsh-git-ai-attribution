@@ -148,10 +148,24 @@ DSH 对话上方会多一个「AI 归因」标签页：按项目、按日期范�
 | 提交后 note 为空 | 该轮编辑发生在插件加载前，或仓库不在会话目录下 |
 | 面板没有「AI 归因」标签 | 插件未加载，检查 `cordis.patch.yml` 的 `insert` 条目和 DSH 重启 |
 | 面板里看不到某个仓库 | 把它所在的父目录加进 `repoRoots`，或在 DSH 里实际编辑并保存过该仓库的文件 |
+| 看板打开很慢 | 冷查询要跑 4~10 个 git 进程（本机每次启动约 1.3 秒）；插件已缓存 5 分钟并在后台静默刷新，「刷新」按钮可强制重查 |
 
 改完 `cordis.patch.yml` 会触发热重载；**只有改 JS 代码才需要重启 DSH**。
 
 `git-ai` 的客户端超时是 15 秒，而实际处理可能要 8~15 秒，所以命令返回非 0 **不代表失败**。插件用 `git-ai status --json` 复核真实结果，不靠退出码判断。
+
+## 推送（github.com 的 TLS 被重置时）
+
+直连 `github.com:443` 会在 TLS 握手时被重置（`api.github.com` 正常），`git push` 报
+`Send failure: Connection was reset`。此时用 REST API 推送，本地与远端会得到**字节级相同**的
+commit 对象，无需事后对账：
+
+```powershell
+pwsh -NoProfile -File scripts/push-via-api.ps1
+```
+
+脚本取本机保存的 GitHub 凭据（`git credential fill`），逐个上传变更文件、生成 tree/commit、
+更新 `refs/heads/master`，并把本地分支同步到同一个 sha。
 
 ## 已知限制
 
