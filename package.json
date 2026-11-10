@@ -1,6 +1,6 @@
 {
   "name": "dsh-git-ai-attribution",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Attribute DSH AI edits to TRAE's git-ai store so they appear in the TRAE enterprise AI contribution report.",
   "type": "module",
   "main": "lib/index.js",
