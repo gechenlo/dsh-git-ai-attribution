@@ -125,11 +125,18 @@ git notes --ref=ai-tob show HEAD
 | `daemonHome` | `$DSH_HOME/git-ai-daemon` | daemon 工作目录，与 TRAE 的互不干扰 |
 | `commitLimit` | `200` | 面板最多显示多少提交 |
 | `cacheTtlMs` | `30000` | 面板数据缓存时长 |
+| `repoRoots` | `[]` | 额外扫描的父目录，用于在面板里列出其中的仓库 |
+| `defaultRepo` | 最近编辑的仓库 | 面板首次打开时选中的项目 |
 | `logPath` | `$DSH_HOME/git-ai-attribution.log` | 诊断日志 |
+
+`repoRoots` 会向下扫描两层：第一层是仓库本身，第二层用于 `_cli-worktrees` 这类容器目录。DSH 实际编辑过的仓库无论是否在 `repoRoots` 下都会出现在列表里。
 
 ## 界面
 
-DSH 对话上方会多一个「AI 归因」标签页：按仓库、按日期范围（默认今天）列出提交的 AI 行、总新增行、贡献率和模型。数据来自本机 Git notes，不依赖网络。
+DSH 对话上方会多一个「AI 归因」标签页：按项目、按日期范围（默认今天）列出提交的 AI 行、总新增行、贡献率和模型。数据来自本机 Git notes，不依赖网络。
+
+**同一项目只占一项。** worktree 和它的主仓库共享同一个 Git 目录，面板会合并成一个条目，名称后标注 `(+1 worktree)`；选中后跨分支查询（`--all`），并只保留当前 Git 用户邮箱的提交，避免把同事的历史算进来。以 `.` 开头的隐藏目录（如 `.mimocode`）不会进入列表。
+
 
 ## 排查
 
@@ -140,6 +147,9 @@ DSH 对话上方会多一个「AI 归因」标签页：按仓库、按日期范�
 | 日志 `attribution unconfirmed` | checkpoint 没落盘，通常是 15 秒超时；重试一次编辑 |
 | 提交后 note 为空 | 该轮编辑发生在插件加载前，或仓库不在会话目录下 |
 | 面板没有「AI 归因」标签 | 插件未加载，检查 `cordis.patch.yml` 的 `insert` 条目和 DSH 重启 |
+| 面板里看不到某个仓库 | 把它所在的父目录加进 `repoRoots`，或在 DSH 里实际编辑并保存过该仓库的文件 |
+
+改完 `cordis.patch.yml` 会触发热重载；**只有改 JS 代码才需要重启 DSH**。
 
 `git-ai` 的客户端超时是 15 秒，而实际处理可能要 8~15 秒，所以命令返回非 0 **不代表失败**。插件用 `git-ai status --json` 复核真实结果，不靠退出码判断。
 
