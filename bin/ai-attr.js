@@ -23,7 +23,7 @@
  * 配置：~/.ai-attr/config.json；日志：~/.ai-attr/ai-attr.log。
  * 看板数据全部来自本机 git notes，企业控制台是否入账需 T+1 在 TRAE 后台核对。
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { homedir } from 'node:os'
@@ -280,6 +280,20 @@ async function cmdSync(flags) {
 }
 
 async function cmdServe(flags) {
+  if (flags.daemon === true) {
+    // 后台常驻：另起一个 detached 进程跑真正的 serve，本进程立即退出（开机自启/计划任务用）
+    const port = Number(flags.port ?? loadConfig().port ?? DEFAULT_PORT)
+    const logFd = openSync(LOG_PATH, 'a')
+    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'serve', '--port', String(port)], {
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      cwd: process.cwd(),
+    })
+    child.unref()
+    closeSync(logFd)
+    console.log(`看板已在后台启动 pid=${child.pid}  http://127.0.0.1:${port}  日志=${LOG_PATH}`)
+    return
+  }
   const cfg = loadConfig()
   const port = Number(flags.port ?? cfg.port ?? DEFAULT_PORT)
   const cache = new Map()
