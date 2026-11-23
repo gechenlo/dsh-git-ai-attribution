@@ -73,6 +73,8 @@
   .warn { color: var(--warn); }
   .error { color: var(--error); }
   .hint { color: var(--muted); font-size: 12px; margin-top: 14px; }
+  .total-title { font-size: 15px; font-weight: 650; margin: 26px 0 10px; }
+  .total-title .muted { font-weight: 400; font-size: 12.5px; }
   .error-box {
     background: #fef2f2;
     border: 1px solid #fecaca;
@@ -105,6 +107,7 @@
     <div class="card"><div class="label">提交数</div><div class="value" id="c-count">–</div></div>
   </div>
   <div id="table"></div>
+  <div id="total"></div>
   <div class="hint">数据来自本机 Git notes（refs/notes/ai-tob）；企业看板是否入账，请在 TRAE 控制台按提交时间核对（T+1）。</div>
 </div>
 <script>
@@ -116,6 +119,7 @@
     repo: null,
     days: '7',
     data: null,
+    total: null,
     loading: true,
     refreshing: false,
     error: null,
@@ -222,6 +226,36 @@
       document.getElementById('table').innerHTML = ''
     }
 
+    // 全部项目合计（下方）
+    var totalEl = document.getElementById('total')
+    if (state.total && state.total.totals) {
+      var tt = state.total.totals
+      var totalRows = (state.total.repos || []).map(function (r) {
+        var trate = r.added_lines ? (Math.round(r.ai_lines * 1000 / r.added_lines) / 10) + '%' : '—'
+        return '<tr>'
+          + '<td>' + esc(r.label || r.path) + '</td>'
+          + '<td class="num">' + r.ai_lines + '</td>'
+          + '<td class="num">' + r.added_lines + '</td>'
+          + '<td class="num">' + trate + '</td>'
+          + '<td class="num">' + r.commits + '</td>'
+          + '</tr>'
+      }).join('')
+      totalEl.innerHTML = '<div class="total-title">全部项目合计<span class="muted"> · '
+        + (state.total.repo_count || 0) + ' 个项目 · 数据时间 '
+        + esc(String(state.total.generated || '').replace('T', ' ').slice(0, 16)) + '</span></div>'
+        + '<div class="cards">'
+        + '<div class="card"><div class="label">AI 新增行</div><div class="value">' + tt.ai_lines + '</div></div>'
+        + '<div class="card"><div class="label">总新增行</div><div class="value">' + tt.added_lines + '</div></div>'
+        + '<div class="card rate"><div class="label">AI 贡献率</div><div class="value">' + (tt.rate == null ? '–' : tt.rate + '%') + '</div></div>'
+        + '<div class="card"><div class="label">提交数</div><div class="value">' + tt.commit_count + '</div></div>'
+        + '</div>'
+        + (totalRows.length
+          ? '<table><thead><tr><th>项目</th><th class="num">AI 行</th><th class="num">总新增</th><th class="num">贡献率</th><th class="num">提交数</th></tr></thead><tbody>' + totalRows + '</tbody></table>'
+          : '<div class="sub">该时间范围内没有提交。</div>')
+    } else {
+      totalEl.innerHTML = ''
+    }
+
     var refresh = document.getElementById('refresh')
     refresh.disabled = state.refreshing || state.loading
     refresh.textContent = state.refreshing ? '查询中…' : '刷新'
@@ -251,12 +285,18 @@
     var params = Object.assign({ repo: state.repo }, rangeParams())
     if (state.days === 'all') params.all = '1'
     if (options.force) params.refresh = '1'
-    return api(params).then(function (data) {
+    var totalParams = Object.assign({}, params, { total: '1' })
+    delete totalParams.repo
+    var main = api(params).then(function (data) {
       state.data = data
       state.error = null
     }).catch(function (e) {
       state.error = e.message
-    }).finally(function () {
+    })
+    var total = api(totalParams).then(function (t) {
+      state.total = t
+    }).catch(function () { /* 合计失败不影响单仓库视图 */ })
+    return Promise.all([main, total]).finally(function () {
       state.loading = false
       state.refreshing = false
       render()

@@ -283,16 +283,86 @@ async function cmdServe(flags) {
   const cfg = loadConfig()
   const port = Number(flags.port ?? cfg.port ?? DEFAULT_PORT)
   const cache = new Map()
-  const inflight = new Set()
+  const inflight = new Map() // key -> Promise：同 key 只算一次，杜绝并发重复 collect
 
+  let listCache = null
   const reposNow = () => {
+    if (listCache && Date.now() - listCache.at < 60_000) return listCache.data
     const current = loadConfig()
-    return buildRepoList({ extra: current.extraRepos ?? [], roots: current.repoRoots ?? [] })
+    const data = buildRepoList({ extra: current.extraRepos ?? [], roots: current.repoRoots ?? [] })
+    listCache = { at: Date.now(), data }
+    return data
   }
 
   const json = (res, status, body) => {
     res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
     res.end(JSON.stringify(body))
+  }
+
+  // stale-while-revalidate：命中期内直接回；过半期/强制时后台重算但先回旧数据；未命中等首算
+  const cached = async (key, forced, compute) => {
+    const hit = cache.get(key)
+    const age = hit ? Date.now() - hit.at : Number.POSITIVE_INFINITY
+    if (hit && age < CACHE_TTL_MS && !forced) return hit.data
+    if (!inflight.has(key)) {
+      const pending = Promise.resolve()
+        .then(compute)
+        .then(data => {
+          cache.set(key, { at: Date.now(), data })
+          return data
+        })
+        .catch(e => {
+          log(`collect failed key=${key}: ${e.message}`)
+          return null
+        })
+        .finally(() => inflight.delete(key))
+      inflight.set(key, pending)
+    }
+    if (hit) return hit.data // stale：立即回旧数据，后台已在刷新
+    const data = await inflight.get(key)
+    if (data == null) throw new Error('查询失败，详见 ai-attr.log')
+    return data
+  }
+
+  // 全部项目合计：分批并行 collect 每个仓库，按同时间窗求和
+  const computeTotal = (since, until, all) => async () => {
+    const list = reposNow()
+    const results = []
+    const CONCURRENCY = 6
+    for (let i = 0; i < list.length; i += CONCURRENCY) {
+      const chunk = list.slice(i, i + CONCURRENCY)
+      const done = await Promise.all(chunk.map(r => collect(r.path, { since, until, all })
+        .catch(e => { log(`total collect failed repo=${r.path}: ${e.message}`); return null })))
+      results.push(...done)
+    }
+    let ai = 0
+    let added = 0
+    let commits = 0
+    const per = []
+    for (let i = 0; i < list.length; i++) {
+      const d = results[i]
+      if (!d) continue
+      ai += d.totals.ai_lines
+      added += d.totals.added_lines
+      commits += d.commits.length
+      if (d.commits.length) {
+        per.push({ label: list[i].label, path: list[i].path, ai_lines: d.totals.ai_lines, added_lines: d.totals.added_lines, commits: d.commits.length })
+      }
+    }
+    per.sort((a, b) => b.added_lines - a.added_lines)
+    return {
+      generated: new Date().toISOString(),
+      since: since ?? null,
+      until: until ?? null,
+      repo_count: list.length,
+      totals: {
+        ai_lines: ai,
+        added_lines: added,
+        commit_count: commits,
+        rate: added ? Math.round(ai * 1000 / added) / 10 : null,
+      },
+      repos: per,
+    }
   }
 
   const server = createServer(async (req, res) => {
@@ -319,36 +389,23 @@ async function cmdServe(flags) {
         })
         return
       }
+      const since = q.get('since') ?? undefined
+      const until = q.get('until') ?? undefined
+      const all = q.get('all') === '1'
+      const forced = q.get('refresh') === '1'
+      if (q.get('total')) {
+        const data = await cached(`total|${since ?? ''}|${until ?? ''}|${all}`, forced, computeTotal(since, until, all))
+        json(res, 200, data)
+        return
+      }
       const repos = reposNow()
       const repo = q.get('repo') ?? repos[0]?.path
       if (!repo) {
         json(res, 400, { error: '还没有仓库：先运行 ai-attr init --root <目录>' })
         return
       }
-      const since = q.get('since') ?? undefined
-      const until = q.get('until') ?? undefined
-      const all = q.get('all') === '1'
       const key = `${repo}|${since ?? ''}|${until ?? ''}|${all}`
-      const hit = cache.get(key)
-      const age = hit ? Date.now() - hit.at : Number.POSITIVE_INFINITY
-      const forced = q.get('refresh') === '1'
-      if (hit && age < CACHE_TTL_MS && !forced) {
-        json(res, 200, hit.data)
-        return
-      }
-      if (!inflight.has(key)) {
-        inflight.add(key)
-        collect(repo, { since, until, all })
-          .then(data => cache.set(key, { at: Date.now(), data }))
-          .catch(e => log(`collect failed repo=${repo}: ${e.message}`))
-          .finally(() => inflight.delete(key))
-      }
-      if (hit) {
-        json(res, 200, hit.data) // stale-while-revalidate：先回旧数据，后台刷新
-        return
-      }
-      const data = await collect(repo, { since, until, all })
-      cache.set(key, { at: Date.now(), data })
+      const data = await cached(key, forced, () => collect(repo, { since, until, all }))
       json(res, 200, data)
     } catch (e) {
       log(`serve request failed: ${e.message}`)
