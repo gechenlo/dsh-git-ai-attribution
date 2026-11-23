@@ -1,0 +1,297 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 归因看板</title>
+<style>
+  :root {
+    --accent: #ff4d00;
+    --accent-soft: rgba(255, 77, 0, .12);
+    --ok: #1a7f37;
+    --warn: #b45309;
+    --error: #b42318;
+    --border: #e5e7eb;
+    --muted: #6b7280;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 24px;
+    font: 14px/1.6 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    color: #111827;
+    background: #f9fafb;
+  }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+  .head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  h1 { font-size: 20px; margin: 0; }
+  h1 .dot { color: var(--accent); }
+  .spacer { flex: 1; }
+  select, button {
+    font: inherit;
+    padding: 5px 12px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: #fff;
+    cursor: pointer;
+  }
+  button:hover { border-color: var(--accent); color: var(--accent); }
+  button.active {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  button:disabled { opacity: .55; cursor: default; }
+  .sub { color: var(--muted); font-size: 12.5px; margin-bottom: 16px; }
+  .cards { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+  .card {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px 18px;
+    min-width: 150px;
+  }
+  .card .label { font-size: 12px; color: var(--muted); }
+  .card .value { font-size: 26px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px; }
+  .card.rate .value { color: var(--accent); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  th, td { padding: 8px 12px; border-bottom: 1px solid #f3f4f6; text-align: left; vertical-align: top; }
+  th { background: #f3f4f6; font-size: 12.5px; color: #374151; position: sticky; top: 0; }
+  tr:last-child td { border-bottom: none; }
+  .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .mono { font-family: Consolas, "Courier New", monospace; font-size: 12.5px; }
+  .muted { color: var(--muted); }
+  .ok { color: var(--ok); }
+  .warn { color: var(--warn); }
+  .error { color: var(--error); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 14px; }
+  .error-box {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: var(--error);
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin: 12px 0;
+  }
+  @media (max-width: 760px) { body { padding: 14px; } .card { min-width: 130px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <h1>AI 归因<span class="dot">·</span>看板</h1>
+    <select id="repo"></select>
+    <div class="spacer"></div>
+    <button data-days="1">今天</button>
+    <button data-days="7">近 7 天</button>
+    <button data-days="30">近 30 天</button>
+    <button data-days="all">全部</button>
+    <button id="refresh">刷新</button>
+  </div>
+  <div class="sub" id="sub">加载中…</div>
+  <div id="error"></div>
+  <div class="cards" id="cards" hidden>
+    <div class="card"><div class="label">AI 新增行</div><div class="value" id="c-ai">–</div></div>
+    <div class="card"><div class="label">总新增行</div><div class="value" id="c-total">–</div></div>
+    <div class="card rate"><div class="label">AI 贡献率</div><div class="value" id="c-rate">–</div></div>
+    <div class="card"><div class="label">提交数</div><div class="value" id="c-count">–</div></div>
+  </div>
+  <div id="table"></div>
+  <div class="hint">数据来自本机 Git notes（refs/notes/ai-tob）；企业看板是否入账，请在 TRAE 控制台按提交时间核对（T+1）。</div>
+</div>
+<script>
+(function () {
+  'use strict'
+  var ENDPOINT = '/git-ai-attribution.json'
+  var state = {
+    repos: [],
+    repo: null,
+    days: '7',
+    data: null,
+    loading: true,
+    refreshing: false,
+    error: null,
+  }
+
+  function esc(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    })
+  }
+
+  function isoDay(date) {
+    var m = String(date.getMonth() + 1).padStart(2, '0')
+    var d = String(date.getDate()).padStart(2, '0')
+    return date.getFullYear() + '-' + m + '-' + d
+  }
+
+  function api(params) {
+    var qs = new URLSearchParams()
+    Object.keys(params).forEach(function (key) {
+      if (params[key] !== undefined && params[key] !== null && params[key] !== '') qs.set(key, params[key])
+    })
+    return fetch(ENDPOINT + '?' + qs, { cache: 'no-store' }).then(function (res) {
+      return res.json().catch(function () { return {} }).then(function (body) {
+        if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status))
+        return body
+      })
+    })
+  }
+
+  function rangeParams() {
+    if (state.days === 'all') return {}
+    var end = new Date()
+    var start = new Date()
+    start.setDate(start.getDate() - (Number(state.days) - 1))
+    return { since: isoDay(start), until: isoDay(end) }
+  }
+
+  function statusCell(commit) {
+    if (commit.ai_lines > 0) return '<span class="ok">已记录 ' + commit.ai_lines + ' 行</span>'
+    if (commit.has_note) return '<span class="warn">已结算，无 AI 行</span>'
+    return '<span class="muted">无归因</span>'
+  }
+
+  function render() {
+    // 仓库下拉
+    var repoSelect = document.getElementById('repo')
+    repoSelect.innerHTML = state.repos.map(function (r) {
+      return '<option value="' + esc(r.path) + '"' + (r.path === state.repo ? ' selected' : '') + '>' + esc(r.label || r.path) + '</option>'
+    }).join('')
+    repoSelect.disabled = !state.repos.length
+
+    // 预设按钮
+    Array.prototype.forEach.call(document.querySelectorAll('button[data-days]'), function (button) {
+      button.classList.toggle('active', button.getAttribute('data-days') === state.days)
+    })
+
+    // 副标题
+    var parts = []
+    if (state.repo) parts.push(state.repo)
+    if (state.data) parts.push('最近 ' + state.data.commits.length + ' 次提交')
+    if (state.data) parts.push('数据时间 ' + state.data.generated.replace('T', ' ').slice(0, 16))
+    if (state.refreshing) parts.push('正在查询…')
+    document.getElementById('sub').textContent = parts.join(' · ') || (state.loading ? '加载中…' : '')
+
+    // 错误
+    document.getElementById('error').innerHTML = state.error
+      ? '<div class="error-box">' + esc(state.error) + '</div>'
+      : ''
+
+    // 卡片与表格
+    var cards = document.getElementById('cards')
+    if (state.data) {
+      cards.hidden = false
+      var totals = state.data.totals || { ai_lines: 0, added_lines: 0 }
+      document.getElementById('c-ai').textContent = totals.ai_lines
+      document.getElementById('c-total').textContent = totals.added_lines
+      document.getElementById('c-rate').textContent = totals.added_lines
+        ? (Math.round(totals.ai_lines * 1000 / totals.added_lines) / 10) + '%'
+        : '–'
+      document.getElementById('c-count').textContent = state.data.commits.length
+      var rows = state.data.commits.map(function (c) {
+        var rate = c.rate == null ? '—' : c.rate + '%'
+        return '<tr>'
+          + '<td class="mono">' + esc(c.short) + '</td>'
+          + '<td class="mono muted">' + esc(c.time) + '</td>'
+          + '<td>' + esc(c.subject) + '</td>'
+          + '<td class="num">' + c.ai_lines + '</td>'
+          + '<td class="num">' + c.added_lines + '</td>'
+          + '<td class="num">' + rate + '</td>'
+          + '<td class="muted">' + esc((c.models || []).join('、')) + '</td>'
+          + '<td>' + statusCell(c) + '</td>'
+          + '</tr>'
+      }).join('')
+      document.getElementById('table').innerHTML = state.data.commits.length
+        ? '<table><thead><tr>'
+          + '<th>提交</th><th>时间</th><th>说明</th>'
+          + '<th class="num">AI 行</th><th class="num">总新增</th><th class="num">贡献率</th>'
+          + '<th>模型</th><th>归因</th>'
+          + '</tr></thead><tbody>' + rows + '</tbody></table>'
+        : '<div class="sub">该时间范围内没有提交。</div>'
+    } else {
+      cards.hidden = true
+      document.getElementById('table').innerHTML = ''
+    }
+
+    var refresh = document.getElementById('refresh')
+    refresh.disabled = state.refreshing || state.loading
+    refresh.textContent = state.refreshing ? '查询中…' : '刷新'
+  }
+
+  function loadList() {
+    return api({ list: '1' }).then(function (body) {
+      state.repos = body.repos || []
+      if (!state.repo || !state.repos.some(function (r) { return r.path === state.repo })) {
+        state.repo = body.current || (state.repos[0] && state.repos[0].path) || null
+      }
+    })
+  }
+
+  function load(options) {
+    options = options || {}
+    if (!state.repo) {
+      state.loading = false
+      state.error = '还没有仓库：先运行 ai-attr init --root <目录>'
+      render()
+      return Promise.resolve()
+    }
+    if (state.data) state.refreshing = true
+    else state.loading = true
+    if (!options.keepError) state.error = null
+    render()
+    var params = Object.assign({ repo: state.repo }, rangeParams())
+    if (state.days === 'all') params.all = '1'
+    if (options.force) params.refresh = '1'
+    return api(params).then(function (data) {
+      state.data = data
+      state.error = null
+    }).catch(function (e) {
+      state.error = e.message
+    }).finally(function () {
+      state.loading = false
+      state.refreshing = false
+      render()
+    })
+  }
+
+  document.getElementById('repo').addEventListener('change', function (event) {
+    state.repo = event.target.value
+    state.data = null
+    load()
+  })
+  Array.prototype.forEach.call(document.querySelectorAll('button[data-days]'), function (button) {
+    button.addEventListener('click', function () {
+      state.days = button.getAttribute('data-days')
+      state.data = null
+      load()
+    })
+  })
+  document.getElementById('refresh').addEventListener('click', function () {
+    load({ force: true })
+  })
+
+  loadList()
+    .then(function () { return load() })
+    .catch(function (e) {
+      state.loading = false
+      state.error = e.message
+      render()
+    })
+
+  // 轻量自动刷新：提交后 hook 写 note 需要几秒
+  setInterval(function () {
+    if (!document.hidden && !state.refreshing) load({ keepError: true })
+  }, 60_000)
+})()
+</script>
+</body>
+</html>

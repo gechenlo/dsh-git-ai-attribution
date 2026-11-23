@@ -1,26 +1,32 @@
 {
   "name": "dsh-git-ai-attribution",
-  "version": "0.4.5",
-  "description": "Attribute DSH AI edits to TRAE's git-ai store so they appear in the TRAE enterprise AI contribution report.",
+  "version": "0.5.0",
+  "description": "Attribute any AI-tool edits into TRAE's git-ai store so they count in the TRAE enterprise AI contribution report. Standalone CLI + local web dashboard; no DSH required.",
   "type": "module",
   "main": "lib/index.js",
+  "bin": {
+    "ai-attr": "./bin/ai-attr.js"
+  },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
     "./package.json": "./package.json"
   },
   "files": [
+    "bin",
     "lib",
+    "scripts",
+    "web",
     "cordis.patch.yml",
     "README.md",
     "LICENSE"
   ],
   "keywords": [
-    "dsh",
-    "dsh-plugin",
+    "ai-attribution",
     "git-ai",
     "trae",
-    "ai-attribution"
+    "post-commit-hook",
+    "dsh-plugin"
   ],
   "engines": {
     "node": ">=20"

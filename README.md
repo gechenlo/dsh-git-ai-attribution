@@ -1,158 +1,132 @@
 # dsh-git-ai-attribution
 
-把 DSH（DeepSeek Harness）里 AI 写的代码，计入 TRAE 企业版的「代码提交 AI 贡献度」。
+把**任何 AI 编程工具**写的代码，计入 TRAE 企业版的「代码提交 AI 贡献度」——一个独立运行的命令行程序 + 本地网页看板，**不依赖 DSH**。
 
-它不是估算，而是走 TRAE 自己那条链路：用 `git-ai` 记录编辑前的基线、编辑后的增量，提交时结算成 Git note，再由 `git-ai` daemon 用 TRAE 的登录凭据上报给企业后端。**TRAE 不需要常驻**。
+它不是估算，而是走 TRAE 自己那条链路：提交时按 `git-ai` 的 note 格式写入逐行归属（`refs/notes/ai-tob`），再由 `git-ai` daemon 用 TRAE 的登录凭据上报企业后端。**TRAE 不需要常驻**。
+
+> 早期版本是 DSH 插件（对话上方的「AI 归因」标签页）。v0.5.0 起改为独立程序，完全替代插件；插件源码仍保留在 `lib/`，见「从插件迁移」。
 
 ## 原理
 
 ```
-DSH 调用 write/edit
-   ├─ 编辑前：git-ai checkpoint (human)   ← 标记"此前的内容是人工的"
-   ├─ 执行编辑
-   └─ 编辑后：git-ai checkpoint (ai_agent) ← 只标记本次改动的文件
-                    ↓
-            仓库内 .git/trae-ai-tob（工作日志）
-                    ↓  git commit
-            refs/notes/ai-tob（逐行归属）
-                    ↓  daemon 结算
-            企业后端上报 → 控制台「AI 贡献度明细」
+git commit（任何工具写的都一样）
+   └─ post-commit hook → ai-attr attribute --repo <r> --sha $GIT_COMMIT
+        ├─ 解析该提交 diff 的全部新增行号
+        ├─ 写 / 补 refs/notes/ai-tob 的逐行归属 note
+        └─ git-ai daemon（带 TRAE 凭据）结算上报
+                ↓
+        企业后端 → 控制台「AI 贡献度明细」（T+1 刷新）
 ```
 
-只统计 **DSH 自己成功执行的 `write` / `edit`**：PowerShell 等外部命令改的文件、插件加载前就存在的未提交改动，一律不计入，避免把人工代码算成 AI。
+- **归因发生在提交时刻**，与编辑工具无关：DSH、Trae、Cursor、VS Code、纯 shell 改的都算。
+- 前提是「已经完全不手写代码」——note 会把该提交 diff 的所有新增行记为 AI。仍手写代码的话不要用 `--any-author` 全量补录。
+- daemon 若抢先结算出空 note，hook 的回填会整体覆盖为完整归属（两种顺序均已实测）。
 
 ## 依赖
 
 | 组件 | 说明 |
 |---|---|
-| DSH | 桌面版或 Web 版，profile 支持外置插件 |
-| TRAE CN 客户端 | 只需安装并登录过一次（提供 `git-ai` 运行时和上报凭据），**不需要常驻运行** |
+| TRAE CN 客户端 | 安装并**登录过一次**（提供 `git-ai` 运行时与上报凭据），不需要常驻运行 |
 | Node.js | ≥ 20 |
+| Git | 常规安装即可 |
 
-`git-ai` 可执行文件和上报凭据都从本机 TRAE 里自动发现，不用手工配置。
+无需 DSH。`git-ai.exe` 与上报凭据都从本机 TRAE 里自动发现。
 
-## 安装
-
-两步：**登记依赖**（让插件出现在插件市场）+ **挂载**（让 DSH 真正加载它）。
-
-### 1. 登记依赖
+## 快速开始
 
 ```powershell
-cd "$env:USERPROFILE\.dsh\profiles\desktop"
-pnpm add github:gechenlo/dsh-git-ai-attribution#v0.3.0
+# 1. 初始化：扫描根目录下的仓库，装 post-commit hook，起 daemon 并注册
+node bin\ai-attr.js init --root D:\work\lowcode
+
+# 2. 启动本地看板（浏览器打开 http://127.0.0.1:7788）
+node bin\ai-attr.js serve --open
+
+# 3. 随时看状态
+node bin\ai-attr.js status
 ```
 
-开发调试时改用本地链接，改完源码重启即生效：
+之后正常 `git commit` 即可：hook 在后台归因，不阻塞提交。
+
+### 命令一览
+
+| 命令 | 作用 |
+|---|---|
+| `init [--root <dir>] [--repo <path>]... [--port N]` | 写配置、给每个仓库装 post-commit hook、起 daemon 并注册 |
+| `serve [--port 7788] [--open]` | 本地网页看板 + 后台 daemon 心跳 |
+| `attribute --repo <path> [--sha <commit>]` | 归因单个提交（hook 调的就是它；sha 缺省 HEAD） |
+| `sync [--repo <path>]... [--dry-run]` | 全量补录/对账：给缺行的提交补 note，幂等 |
+| `status` | 配置 / hook / daemon / 注册状态 + 日志尾部 |
+| `uninstall [--repo]...` | 移除 hook 块（不动已有 note） |
+
+也可以 `npm i -g github:gechenlo/dsh-git-ai-attribution` 后直接用 `ai-attr ...`。
+
+## 看板
+
+`serve` 起纯本地页面（默认 `http://127.0.0.1:7788`）：预设 今天 / 近 7 天 / 近 30 天 / 全部；卡片（AI 新增行、总新增行、贡献率、提交数）+ 逐提交 8 列表格（提交、时间、说明、AI 行、总新增、贡献率、模型、归因状态）。数据来自本机 Git notes，不依赖网络；5 分钟缓存 + 后台静默刷新，「刷新」按钮强制重查。
+
+同一项目的多个检出（worktree）合并为一条；查询自动排除 `refs/notes/*`——否则补录产生的 note 提交会占满「最近 200 条」窗口。
+
+## 配置
+
+配置文件 `~/.ai-attr/config.json`（环境变量 `AI_ATTR_HOME` 可改目录）：
+
+| 键 | 说明 |
+|---|---|
+| `repos` | 登记的仓库列表 |
+| `port` | 看板端口（默认 7788） |
+| `lastRepo` | 看板上次选中的仓库 |
+
+日志：`~/.ai-attr/ai-attr.log`。
+
+## 历史提交补录
+
+装 hook 之前的提交没有归属，用 `sync` 一次性补齐：
 
 ```powershell
-pnpm add file:D:\work\dsh-git-ai-attribution
+node bin\ai-attr.js sync --repo D:\work\lowcode\hyrule-solo
+node bin\ai-attr.js sync --dry-run        # 对全部登记仓库，先看不动手
 ```
 
-> `dsh plugin add` 在 desktop profile 上会被拒绝（该 profile 由 Electron 独占管理），所以直接用 `pnpm add`。自定义 `DSH_HOME` 时把路径里的 `.dsh` 换成实际目录。
-
-### 2. 挂载
-
-在 `%USERPROFILE%\.dsh\profiles\desktop\cordis.patch.yml` 末尾追加：
-
-```yaml
-- insert:
-    - id: git-ai-attribution
-      name: dsh-git-ai-attribution
-      config:
-        enabled: true
-```
-
-重启 DSH。
-
-这条路径已经在 Windows + DSH 桌面版上反复验证过。**热重载注意**：该文件被修改时 DSH 会立即重载插件树，所以增删这个 `insert` 会即时生效，不需要重启。
-
-### 可选：bundle 自动挂载（未充分验证）
-
-包内自带 `cordis.patch.yml` 并声明了 `dsh.bundle`，理论上把包名写进 `dsh.profile.bundles` 就能免去第 2 步：
-
-```json
-"bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app", "dsh-git-ai-attribution"]
-```
-
-**但这条路径尚未在干净重启中验证**。如果采用它，务必不要同时保留上面的 `insert`——同一个 `id` 注册两次会被 loader 拒绝。
-
-> 手动把目录拷进 `node_modules` 也能加载，但插件市场的「已安装」列表读的是 `package.json` 依赖，拷进去不会出现在列表里。
-
-
-## 验证
-
-不启动 DSH 也能自检：
+`sync` 底层是 `scripts/backfill-notes.mjs`，也可以单独使用：
 
 ```powershell
-node scripts\check.mjs D:\path\to\a\git\repo
+node scripts\backfill-notes.mjs --repo <path> [--repo <path> ...] [--author <substr>] [--dry-run]
+node scripts\backfill-notes.mjs --repo <path> --any-author    # 不按作者过滤
+node scripts\backfill-notes.mjs --repo <path> --only <sha>    # 单提交（hook 快路径）
+node scripts\backfill-notes.mjs --repo <path> --repair        # 只清洗写坏的 note
 ```
 
-全部为 `true` 表示链路就绪：
-
-```json
-{"traeBundle":true,"appKey":true,"gitAi":true,"daemon":true,"registered":true}
-```
-
-然后在 DSH 里让 AI 改一个文件，看日志：
-
-```powershell
-Get-Content "$env:USERPROFILE\.dsh\git-ai-attribution.log" -Tail 5
-```
-
-期望出现：
-
-```
-attribution recorded repo=...\your-repo file=src/foo.ts ai_lines=12
-```
-
-提交后约 1 分钟结算：
-
-```powershell
-git notes --ref=ai-tob show HEAD
-```
-
-## 配置项
-
-全部可选，一般不用写。
-
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `enabled` | `true` | 关掉后完全不介入 |
-| `agentName` | `dsh` | 写进 Git note 的工具名 |
-| `traeBundlePath` | 自动发现 | TRAE 的 `resources/app/out/main.js` |
-| `traeStoragePath` | 自动发现 | `%APPDATA%\Trae CN\User\globalStorage\storage.json` |
-| `gitAiBinaryPath` | 取最新版本 | `git-ai.exe` 路径 |
-| `daemonHome` | `$DSH_HOME/git-ai-daemon` | daemon 工作目录，与 TRAE 的互不干扰 |
-| `commitLimit` | `200` | 面板最多显示多少提交 |
-| `cacheTtlMs` | `30000` | 面板数据缓存时长 |
-| `repoRoots` | `[]` | 额外扫描的父目录，用于在面板里列出其中的仓库 |
-| `defaultRepo` | 最近编辑的仓库 | 面板首次打开时选中的项目 |
-| `logPath` | `$DSH_HOME/git-ai-attribution.log` | 诊断日志 |
-
-`repoRoots` 会向下扫描两层：第一层是仓库本身，第二层用于 `_cli-worktrees` 这类容器目录。DSH 实际编辑过的仓库无论是否在 `repoRoots` 下都会出现在列表里。
-
-## 界面
-
-DSH 对话上方会多一个「AI 归因」标签页：按项目、按日期范围（默认今天）列出提交的 AI 行、总新增行、贡献率和模型。数据来自本机 Git notes，不依赖网络。
-
-**同一项目只占一项。** worktree 和它的主仓库共享同一个 Git 目录，面板会合并成一个条目，名称后标注 `(+1 worktree)`；选中后跨分支查询（`--all`），并只保留当前 Git 用户邮箱的提交，避免把同事的历史算进来。以 `.` 开头的隐藏目录（如 `.mimocode`）不会进入列表。
-
+- 作者过滤默认取该仓库的 `git config user.email` / `user.name`，**别人的提交不会被改**。
+- 已有 note 保留原行映射，只补缺失的行（`custom_attributes.backfilled: true` 标记来源）；纯修复不新增 session。
+- 每条提交都用 `--numstat` 复核补丁解析出的新增行数，大偏差跳过，避免写错 note。
+- 补丁按 500 提交分页拉取（大仓库全量 `-p` 输出可达 865MB，单次会撞 `maxBuffer`）。
+- 补完后看板立即生效；企业后台靠 daemon 同步，要等下一次结算与 T+1 刷新。
 
 ## 排查
 
 | 现象 | 处理 |
 |---|---|
-| 日志 `daemon unavailable` | TRAE 没装或没登录过；先装一次并登录 |
-| 日志 `skip attribution: daemon unavailable` | daemon 起不来，检查 `git-ai.exe` 是否被杀软拦截 |
-| 日志 `attribution unconfirmed` | checkpoint 没落盘，通常是 15 秒超时；重试一次编辑 |
-| 提交后 note 为空 | 该轮编辑发生在插件加载前，或仓库不在会话目录下 |
-| 面板没有「AI 归因」标签 | 插件未加载，检查 `cordis.patch.yml` 的 `insert` 条目和 DSH 重启 |
-| 面板里看不到某个仓库 | 把它所在的父目录加进 `repoRoots`，或在 DSH 里实际编辑并保存过该仓库的文件 |
-| 看板打开很慢 | 冷查询要跑 4~10 个 git 进程（本机每次启动约 1.3 秒）；插件已缓存 5 分钟并在后台静默刷新，「刷新」按钮可强制重查 |
+| 提交后没有 note | `ai-attr status` 看 hook 是否安装；看 `~/.ai-attr/ai-attr.log` |
+| daemon 起不来 / 不上报 | TRAE 没装或没登录过；装一次并登录（凭据自动读取） |
+| `status` 里 daemon 无凭据 | 默认 home 的 daemon 不带 DataFinder 配置；本程序用自带凭据的 home 起，别混用 |
+| 看板打开很慢 | 冷查询要跑多个 git 进程（本机每次启动约 1.3 秒）；已缓存 5 分钟并后台刷新 |
+| 端口被占 | `serve --port <其他端口>` |
+| 公司网络 | 上报走 DataFinder 通道，代理环境按 TRAE 登录态里的代理配置 |
 
-改完 `cordis.patch.yml` 会触发热重载；**只有改 JS 代码才需要重启 DSH**。
+## 从插件迁移（v0.5.0）
 
-`git-ai` 的客户端超时是 15 秒，而实际处理可能要 8~15 秒，所以命令返回非 0 **不代表失败**。插件用 `git-ai status --json` 复核真实结果，不靠退出码判断。
+独立版**完全替代** DSH 插件：
+
+1. 删除 `cordis.patch.yml` 里 `id: git-ai-attribution` 的 insert 块（保存即热重载卸载）。
+2. 重启 DSH——插件的 heartbeat 定时器没有 dispose，重启才彻底停。
+3. 可选清理：
+   ```powershell
+   $env:GIT_AI_DAEMON_HOME = "$env:USERPROFILE\.dsh\git-ai-daemon"; git-ai bg shutdown
+   Remove-Item "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\dsh-git-ai-attribution"
+   ```
+4. 用 `init` 重新登记仓库（配置在 `~/.ai-attr/`，与插件的 `$DSH_HOME` 互不干扰）。
+
+插件源码仍在 `lib/index.js` / `lib/client.js`；核心逻辑已抽到 `lib/core.js`，两边共用。
 
 ## 推送（github.com 的 TLS 被重置时）
 
@@ -169,12 +143,11 @@ pwsh -NoProfile -File scripts/push-via-api.ps1
 
 ## 已知限制
 
-- **只认 DSH 的 `write` / `edit`**：通过 PowerShell、后台任务、外部编辑器改的文件不会归因。
+- **口径 = 提交时全量记 AI**：为「已完全不手写代码、缺口纯粹是工具误差」的场景设计。
 - **必须提交才有数据**：企业口径按 commit 统计，工作区改动不算。
-- **凭据来自 TRAE 登录态**：长期不登录 TRAE、凭据过期后会上报失败，重新登录一次即可。
-- **历史提交无法补录**：归因发生在编辑时刻，事后无法追溯。
-- **合并提交通常没有 note**：`git-ai` 对 merge commit 的结算有限制。
-- 企业看板的刷新时间官方没有明确承诺，实测当天数据在次日凌晨之后才出现。
+- **凭据来自 TRAE 登录态**：过期后重新登录一次即可。
+- **合并提交通常没有 note**：`git-ai` 对 merge commit 的结算有限制，补录也跳过 merge。
+- **企业看板 T+1**：官方没有明确承诺刷新时间，实测当天数据在次日凌晨之后才出现。
 
 ## 许可
 
