@@ -2,15 +2,17 @@
 /**
  * ai-attr — 不依赖 DSH 的 AI 归因程序。
  *
- * 任何 AI 编程工具（或手工）产生的提交，都通过 post-commit hook 在提交时
- * 把新增行写进 git-ai authorship note（refs/notes/ai-tob）；企业上报由带
- * TRAE 凭据的 git-ai daemon 完成；本地看板是一个独立网页。
+ * 任何 AI 编程工具（或手工）产生的提交，都通过 pre-commit hook 在提交前声明为 AI 编辑
+ * （写 git-ai checkpoint），daemon 结算时自己写 note（refs/notes/ai-tob）并把 ai>0
+ * 上报企业后台（带 TRAE 凭据）；post-commit hook 只做延迟兜底补 note；本地看板是独立网页。
  *
  * 用法：
  *   ai-attr init [--root <目录>]... [--repo <仓库>]... [--port <端口>]
- *       写配置、给发现的仓库安装 post-commit hook、启动 daemon 并注册。
+ *       写配置、安装 pre-commit + post-commit hook、启动 daemon 并注册。
+ *   ai-attr checkpoint --repo <仓库>
+ *       把暂存区改动声明为 AI 编辑（pre-commit hook 调用；daemon 结算后上报企业后台）。
  *   ai-attr attribute --repo <仓库> [--sha <sha>]
- *       归因一个提交（post-commit hook 调用；单提交快路径）。
+ *       归因一个提交（post-commit hook 兜底调用；单提交快路径）。
  *   ai-attr sync [--repo <仓库>]... [--dry-run]
  *       全量补录历史提交的 note，然后注册所有仓库触发企业侧扫描。
  *   ai-attr serve [--port <端口>] [--open]
@@ -23,7 +25,7 @@
  * 配置：~/.ai-attr/config.json；日志：~/.ai-attr/ai-attr.log。
  * 看板数据全部来自本机 git notes，企业控制台是否入账需 T+1 在 TRAE 后台核对。
  */
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawn, spawnSync } from 'node:child_process'
 import { createServer } from 'node:http'
 import { homedir } from 'node:os'
@@ -144,23 +146,16 @@ async function registerAll(manager, repos) {
   return results.filter(r => r.status === 'fulfilled').length
 }
 
-// ---------- post-commit hook ----------
+// ---------- git hooks（pre-commit 写 checkpoint、post-commit 兜底补 note） ----------
 
-function hookPathOf(repo) {
-  return join(repo, '.git', 'hooks', 'post-commit')
+function hookPathOf(repo, kind = 'post-commit') {
+  return join(repo, '.git', 'hooks', kind)
 }
 
-function installHook(repo) {
-  const file = hookPathOf(repo)
+function writeHookBlock(file, blockLines) {
   mkdirSync(dirname(file), { recursive: true })
-  const block = [
-    BEGIN,
-    '# 由 ai-attr init 安装：提交后把本提交新增行归因为 AI；ai-attr uninstall 可移除',
-    `AI_ATTR_HOME="${toPosix(CONFIG_DIR)}" "${toPosix(process.execPath)}" "${toPosix(join(ROOT, 'bin', 'ai-attr.js'))}" attribute --repo "${toPosix(repo)}" --sha "$GIT_COMMIT" >> "${toPosix(LOG_PATH)}" 2>&1 &`,
-    END,
-  ].join('\n')
   // Windows 上 git 直接 spawn 无 shebang 的 hook 会报 cannot spawn ENOENT
-  const script = `#!/bin/sh\n${block}\n`
+  const script = `#!/bin/sh\n${blockLines.join('\n')}\n`
   const existing = existsSync(file) ? readFileSync(file, 'utf8') : ''
   const had = existing.includes(BEGIN)
   const cleaned = existing
@@ -168,21 +163,49 @@ function installHook(repo) {
     .replace(/# ai-attr: begin[\s\S]*?# ai-attr: end\n?/g, '')
   const next = cleaned.trim() ? `${cleaned.replace(/\s*$/, '\n')}${script}` : script
   writeFileSync(file, next, { mode: 0o755 })
-  return had ? 'updated' : 'installed'
+  return had
+}
+
+function installHook(repo) {
+  const head = `AI_ATTR_HOME="${toPosix(CONFIG_DIR)}" "${toPosix(process.execPath)}" "${toPosix(join(ROOT, 'bin', 'ai-attr.js'))}"`
+  const toLog = `>> "${toPosix(LOG_PATH)}" 2>&1`
+  const hadPre = writeHookBlock(hookPathOf(repo, 'pre-commit'), [
+    BEGIN,
+    '# 由 ai-attr init 安装：提交前把暂存改动声明为 AI 编辑，daemon 结算后写 note 并上报企业后台。',
+    '# 同步执行（不 &）：先发 human 基线再发 ai_agent，轮询 daemon 日志等',
+    '# `checkpoint: saved kind=AiAgent` 才放行——保存必须早于提交（生产实测保存',
+    '# 晚于提交 14.7 秒则结算 attestations=0）。保存通常在受理后 15~20 秒，总时长',
+    '# 约 40 秒（最长 75 秒）；超时记 SAVE-TIMEOUT 继续，不阻塞提交。',
+    `${head} checkpoint --repo "${toPosix(repo)}" ${toLog}`,
+    END,
+  ])
+  const hadPost = writeHookBlock(hookPathOf(repo, 'post-commit'), [
+    BEGIN,
+    '# 由 ai-attr init 安装：延迟兜底补 note。有 checkpoint 时 daemon 约 75 秒后自己写 note',
+    '# 并上报（ai>0）；立即写 note 会打断结算（preserved note is invalid），',
+    '# 所以只在 240 秒后补写——note 已完整则跳过。',
+    `( sleep 240 ; ${head} attribute --repo "${toPosix(repo)}" --sha "$GIT_COMMIT" ) ${toLog} &`,
+    END,
+  ])
+  return hadPre || hadPost ? 'updated' : 'installed'
 }
 
 function uninstallHook(repo) {
-  const file = hookPathOf(repo)
-  if (!existsSync(file)) return 'absent'
-  const text = readFileSync(file, 'utf8')
-  if (!text.includes(BEGIN)) return 'absent'
-  const cleaned = text
-    .replace(/#!\/bin\/sh\r?\n(?=# ai-attr: begin)/, '')
-    .replace(/# ai-attr: begin[\s\S]*?# ai-attr: end\n?/g, '')
-    .replace(/\s+$/, '')
-  if (!cleaned.trim()) rmSync(file)
-  else writeFileSync(file, `${cleaned}\n`, { mode: 0o755 })
-  return 'removed'
+  let removed = 'absent'
+  for (const kind of ['pre-commit', 'post-commit']) {
+    const file = hookPathOf(repo, kind)
+    if (!existsSync(file)) continue
+    const text = readFileSync(file, 'utf8')
+    if (!text.includes(BEGIN)) continue
+    const cleaned = text
+      .replace(/#!\/bin\/sh\r?\n(?=# ai-attr: begin)/, '')
+      .replace(/# ai-attr: begin[\s\S]*?# ai-attr: end\n?/g, '')
+      .replace(/\s+$/, '')
+    if (!cleaned.trim()) rmSync(file)
+    else writeFileSync(file, `${cleaned}\n`, { mode: 0o755 })
+    removed = 'removed'
+  }
+  return removed
 }
 
 // ---------- 子命令 ----------
@@ -256,6 +279,118 @@ async function cmdAttribute(flags) {
   }
   saveConfig({ lastRepo: repo })
   process.exitCode = code
+}
+
+/**
+ * 把暂存区改动声明为 AI 编辑（pre-commit hook 同步调用）。
+ * 完全复刻插件时序：先发 human 基线、再发 ai_agent，然后**等 daemon 日志出现
+ * `checkpoint: saved … kind=AiAgent` 才放行提交**。生产实测（dc7b0db）：确认
+ * 只等 `checkpoint start` 时 git 在确认后 1.3s 就建了提交、而保存晚于提交 14.7s
+ * → 结算 attestations=0；成功的轮次与插件时代窗口全部是 saved 早于提交。
+ * 另：working log 里没有任何 Human 记录时（生产首提交）结算拿不到基线 → att=0，
+ * 所以 human 必发（human 不占行 additions=0，只做基线标记）。
+ * 客户端 10 秒被杀无妨：stdin 写完即送达，daemon 异步处理；exit=1 不代表失败。
+ */
+async function cmdCheckpoint(flags) {
+  const repoFlag = asArray(flags.repo)
+  if (!repoFlag.length) {
+    console.error('用法: ai-attr checkpoint --repo <仓库>')
+    process.exitCode = 1
+    return
+  }
+  const repo = mainCheckout(resolve(repoFlag.at(-1)))
+  const t0 = Date.now()
+  const staged = spawnSync('git', ['-C', repo, 'diff', '--cached', '--name-only', '-z'], { timeout: 20_000, windowsHide: true })
+  const t1 = Date.now()
+  const files = staged.status === 0 ? staged.stdout.toString('utf8').split('\0').filter(Boolean).map(toPosix) : []
+  if (!files.length) {
+    log(`checkpoint skip repo=${repo} (暂存区为空或 diff 失败 exit=${staged.status})`)
+    process.exitCode = staged.status === 0 ? 0 : 1
+    return
+  }
+  const payload = {
+    type: 'ai_agent',
+    repo_working_dir: toPosix(repo),
+    agent_name: 'ai-attr',
+    model: 'trae-cn/deepseek-v4.1-flash',
+    conversation_id: `ai-attr-${Date.now().toString(36)}-${process.pid}`,
+    edited_filepaths: files,
+    transcript: { messages: [{ type: 'user', text: 'ai-attr: commit declared as AI-authored', timestamp: new Date().toISOString() }] },
+  }
+  const humanPayload = { type: 'human', repo_working_dir: toPosix(repo), will_edit_filepaths: files }
+  // daemon 可能已死（租约过期会自停，第六轮实测 5 分钟无心跳即 drain 后 shutdown）。
+  // 不 ensure 的话连接直接被拒、请求静默丢失——提交照样成功但结算拿不到 checkpoint。
+  await ensureDaemon()
+  // daemon 受理日志：投递完成的客观信号。轮询它（而非傻等固定秒数）决定何时
+  // 放行提交——git 在 hook 返回后 <1s 就创建提交，客户端受理要 8~16s，等固定
+  // 秒数永远在赌运气（第三、四轮输：提交先于受理创建 → 结算 attestations=0）。
+  const daemonHome = loadConfig().daemonHome ?? join(CONFIG_DIR, 'daemon')
+  const logDir = join(daemonHome, 'internal', 'daemon', 'logs')
+  // daemon 启动时打开的日志文件名 = 启动日期，跨天不滚动（生产 daemon 11-23 启动，
+  // 11-24 的 saved 行仍写在 11-23 文件里）——按当天日期猜文件名永远找不到，必须
+  // 每轮挑"最新被修改"的 git-ai-daemon-*.log。
+  const pickLogFile = () => {
+    try {
+      let best = null, bestM = -1
+      for (const f of readdirSync(logDir)) {
+        if (!f.startsWith('git-ai-daemon-') || !f.endsWith('.log')) continue
+        const m = statSync(join(logDir, f)).mtimeMs
+        if (m > bestM) { bestM = m; best = join(logDir, f) }
+      }
+      return best
+    } catch { return null }
+  }
+  const fileOffsets = new Map()
+  const readNew = () => {
+    const f = pickLogFile()
+    if (!f) return ''
+    let off = fileOffsets.get(f) ?? 0 // 首次见到该文件从头读；base 唯一，旧行不会误匹配
+    try {
+      const size = statSync(f).size
+      if (size < off) off = 0
+      if (size > off) { const chunk = readFileSync(f).subarray(off).toString('utf8'); fileOffsets.set(f, size); return chunk }
+      fileOffsets.set(f, off)
+      return ''
+    } catch { return '' }
+  }
+  const sleepSync = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  try {
+    const daemon = makeDaemon()
+    const env = { ...process.env, ...daemon.environment(), GIT_AI_NOTES_REF: 'refs/notes/ai-tob' }
+    const t2 = Date.now()
+    // 客户端 10 秒被杀无妨：请求已投递（stdin 写完即送达），daemon 异步处理
+    // （单个 save ~15-20 秒）。真正的放行条件在下面的 saved 轮询。
+    const human = spawnSync(daemon.binary, ['checkpoint', 'agent-v1', '--hook-input', 'stdin'], {
+      input: JSON.stringify(humanPayload), env, cwd: repo, encoding: 'utf8', timeout: 10_000, windowsHide: true,
+    })
+    const sent = spawnSync(daemon.binary, ['checkpoint', 'agent-v1', '--hook-input', 'stdin'], {
+      input: JSON.stringify(payload), env, cwd: repo, encoding: 'utf8', timeout: 10_000, windowsHide: true,
+    })
+    const t3 = Date.now()
+    log(`checkpoint sent repo=${repo} files=${files.length} human_exit=${human.status} ai_exit=${sent.status} stages start->diff=${t1 - t0}ms ->env=${t2 - t1}ms ->client=${t3 - t2}ms${sent.stderr ? ` err=${sent.stderr.trim().slice(0, 200)}` : ''}`)
+    // 等 `checkpoint: saved … kind=AiAgent` 才放行提交——git 在 hook 返回后 <1s
+    // 创建提交，而保存要再花 15~20 秒；保存晚于提交则结算 attestations=0（生产
+    // dc7b0db 实测晚 14.7 秒 → att=0）。注意：saved 行不含 repo 路径，只有
+    // `base=<父提交前7位>`——pre-commit 时的 HEAD 就是 daemon 要记的 base，按它匹配。
+    const headSha = (() => {
+      try { return spawnSync('git', ['-C', repo, 'rev-parse', 'HEAD'], { encoding: 'utf8', timeout: 10_000 }).stdout?.trim() ?? '' } catch { return '' }
+    })()
+    const wantBase = headSha ? `base=${headSha.slice(0, 7)}` : null
+    const deadline = Date.now() + 75_000
+    let confirmed = false
+    while (!confirmed && Date.now() < deadline) {
+      const chunk = readNew()
+      if (chunk) for (const line of chunk.split('\n')) {
+        if (line.includes('checkpoint: saved') && line.includes('kind=AiAgent') && (!wantBase || line.includes(wantBase))) { confirmed = true; break }
+      }
+      if (!confirmed) sleepSync(400)
+    }
+    log(`checkpoint ${confirmed ? 'saved' : 'SAVE-TIMEOUT'} repo=${repo} ${wantBase ?? ''} saved-after=${Date.now() - t3}ms`)
+  } catch (e) {
+    log(`checkpoint send failed repo=${repo}: ${e.message}`)
+  }
+  // 不在这里做 register（bootstrap-sync 单次要 ~9 秒）：init 与 serve 的心跳
+  // 已经维持注册；实验也证明结算与上报不依赖提交时刻的租约刷新。
 }
 
 async function cmdSync(flags) {
@@ -460,8 +595,11 @@ async function cmdStatus() {
   const repos = buildRepoList({ extra: cfg.extraRepos ?? [], roots: cfg.repoRoots ?? [] })
   console.log(`\n仓库（${repos.length}）:`)
   for (const r of repos) {
-    const file = hookPathOf(mainCheckout(r.path))
-    const installed = existsSync(file) && readFileSync(file, 'utf8').includes(BEGIN)
+    const main = mainCheckout(r.path)
+    const installed = ['pre-commit', 'post-commit'].every((kind) => {
+      const f = hookPathOf(main, kind)
+      return existsSync(f) && readFileSync(f, 'utf8').includes(BEGIN)
+    })
     console.log(`  ${installed ? '[hook]' : '  --  '} ${r.label ?? r.path}`)
   }
 
@@ -505,9 +643,11 @@ function printHelp() {
 
 用法:
   ai-attr init --root <目录>... [--repo <仓库>]... [--port <端口>]
-      写配置、安装 post-commit hook、启动 daemon 并注册仓库
+      写配置、安装 pre-commit + post-commit hook、启动 daemon 并注册仓库
+  ai-attr checkpoint --repo <仓库>
+      把暂存区改动声明为 AI 编辑（pre-commit hook 调用）
   ai-attr attribute --repo <仓库> [--sha <sha>]
-      归因单个提交（post-commit hook 调用）
+      归因单个提交（post-commit hook 兜底调用）
   ai-attr sync [--repo <仓库>]... [--dry-run]
       全量补录历史 note 并注册仓库（企业侧 T+1 生效）
   ai-attr serve [--port <端口>] [--open]
@@ -530,6 +670,9 @@ try {
   switch (command) {
     case 'init':
       await cmdInit(flags)
+      break
+    case 'checkpoint':
+      await cmdCheckpoint(flags)
       break
     case 'attribute':
       await cmdAttribute(flags)
